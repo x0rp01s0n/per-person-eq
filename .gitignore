@@ -1,0 +1,7 @@
+/.vencord
+/dist/
+/dist.previous/
+/dist.staging/
+/previous-location.json
+/node_modules/
+*.log
