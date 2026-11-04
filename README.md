@@ -1,7 +1,18 @@
 # PerPersonEQ
 
 A local Vencord plugin for Vesktop: a saved 12-band equalizer for each person's
-incoming voice audio. Built to coexist with VolumeBooster.
+incoming voice audio, based on
+[Vencord's VolumeBooster plugin](https://github.com/Vencord/Vencord/tree/main/src/plugins/volumeBooster)
+and its Web Audio routing. PerPersonEQ extends VolumeBooster's existing playback
+path rather than creating a separate one. **VolumeBooster must remain enabled.**
+
+## Credits
+
+This project builds on the audio-routing approach in **VolumeBooster**, with
+credit to its authors and the Vencord contributors. VolumeBooster provides the
+incoming stream source, volume gain, mute handling, and output-device selection;
+PerPersonEQ adds per-user EQ filters, controls, and saved profiles on that path.
+This is an independent custom plugin, not an official Vencord or Vesktop release.
 
 ## Use
 
