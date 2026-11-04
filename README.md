@@ -3,20 +3,23 @@
 A local Vencord plugin for Vesktop: a saved 12-band equalizer for each person's
 incoming voice audio, based on
 [Vencord's VolumeBooster plugin](https://github.com/Vencord/Vencord/tree/main/src/plugins/volumeBooster)
-and its Web Audio routing. PerPersonEQ extends VolumeBooster's existing playback
-path rather than creating a separate one. **VolumeBooster must remain enabled.**
+and its Web Audio routing approach. **VolumeBooster is optional.** PerPersonEQ
+uses its own audio hooks and works with or without VolumeBooster enabled.
 
 ## Credits
 
-This project builds on the audio-routing approach in **VolumeBooster**, with
-credit to its authors and the Vencord contributors. VolumeBooster provides the
-incoming stream source, volume gain, mute handling, and output-device selection;
-PerPersonEQ adds per-user EQ filters, controls, and saved profiles on that path.
+Author: **null234**.
+
+This project is based on the audio-routing approach in **VolumeBooster**, with
+credit to its authors, **Nuckyz** and **sadan**, and the Vencord contributors.
+PerPersonEQ independently handles its incoming stream source, volume, mute,
+output-device selection, EQ filters, controls, and saved profiles. When enabled,
+VolumeBooster still provides its higher volume limits.
 This is an independent custom plugin, not an official Vencord or Vesktop release.
 
 ## Use
 
-Keep **VolumeBooster** and **PerPersonEQ** enabled. Right-click a person and select
+Enable **PerPersonEQ**. Right-click a person and select
 **Equalizer**. Changes apply immediately and save automatically. Saved profiles
 are also available in PerPersonEQ's plugin settings.
 
@@ -24,7 +27,8 @@ are also available in PerPersonEQ's plugin settings.
 - Preamp attenuation, bypass, reset, and automatic EQ headroom.
 - Profiles keyed by Discord user ID and stored locally in Vencord's IndexedDB.
 - Voice calls with or without webcams. Screen-share audio is left unchanged.
-- VolumeBooster retains control of volume, mute/deafen, and output devices.
+- Respects user volume, mute/deafen, and selected output devices.
+- Can coexist with VolumeBooster without changing its plugin methods.
 
 Auto headroom compensates the combined EQ response. It is not a limiter and does
 not prevent clipping introduced by VolumeBooster or other processing. Stable and
@@ -90,11 +94,15 @@ real Chromium Web Audio nodes and offline audio rendering:
 
 ```sh
 node test-audio.mjs
+node test-patches.mjs
 ```
 
 The default browser is `/usr/bin/google-chrome-stable`; set `CHROME_PATH` for a
 different Chromium binary. Tests cover EQ response, profile validation, gain and
-mute preservation, bypass, headroom, duplicate-route prevention, and teardown.
+mute preservation, bypass, headroom, duplicate-route prevention, track replacement,
+output-device fallback, and teardown. Isolated integration tests exercise the
+actual plugin hooks and both patch application orders with upstream VolumeBooster.
+They do not connect to Discord or alter a running Vesktop session.
 
 ## Restore
 
@@ -110,15 +118,22 @@ changing other settings. Start Vesktop normally. For manual installs, reset
 
 ## Implementation
 
-`plugin/index.tsx` wraps VolumeBooster's `patchVolume` method. It matches streams
-against the media engine's default voice connections, including webcam calls,
-and inserts filters into VolumeBooster's existing output route. It does not add
-its own Discord source patches. Unchanged and bypassed profiles retain the direct
-VolumeBooster route. Stale routes are pruned and stopping the plugin restores
-the original output routing.
+`plugin/patches.ts` hooks Discord's voice-output update, track-change, and destroy
+methods. `plugin/index.tsx` matches outputs against the media engine's default
+voice connections, including webcam calls. Non-flat profiles use an independent
+Web Audio source, volume gain, and EQ chain, leaving Discord's speaking analyser
+alone. Native element playback and any existing VolumeBooster playback edge are
+silenced while this route is active, preventing double playback. Flat and bypassed
+profiles use the original Discord/VolumeBooster route.
+
+Track replacement rebuilds the source; destruction immediately disconnects it.
+Stopping restores the original playback route. Output-device changes use
+`AudioContext.setSinkId`; unavailable or rejected non-default device selection
+falls back to the original playback path instead of choosing the wrong speakers.
 
 This is an unofficial custom plugin, not supported by the Vencord or Vesktop
-maintainers. It depends on Discord and VolumeBooster internals remaining compatible.
+maintainers. It depends on Discord internals remaining compatible. Compatibility
+with optional VolumeBooster also depends on its audio-routing implementation.
 
 ## License
 

@@ -1,6 +1,6 @@
 /*
  * Vencord, a Discord client mod
- * Copyright (c) 2026 PerPersonEQ contributors
+ * Copyright (c) 2026 null234
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
@@ -15,21 +15,31 @@ export interface Profile {
 
 export interface VoiceStream {
     id: string;
-    videoStreamId?: string | null;
     audioContext: AudioContext;
+    audioElement: HTMLAudioElement | null;
     gainNode?: GainNode;
+    sinkId: string | null;
     stream: MediaStream;
+    _mute: boolean;
+    _volume: number;
+    updateAudioElement(): void;
 }
 
 interface Route {
-    data: VoiceStream;
-    userId: string;
+    source: MediaStreamAudioSourceNode;
+    track: MediaStreamTrack;
+    nativeGain?: GainNode;
     gain: GainNode;
     preamp: GainNode;
     filters: BiquadFilterNode[];
     meters: BiquadFilterNode[];
     headroom: number;
     signature: string;
+}
+
+interface OutputContext extends AudioContext {
+    sinkId?: string;
+    setSinkId?(sinkId: string): Promise<void>;
 }
 
 export function defaultProfile(): Profile {
@@ -81,58 +91,101 @@ function smooth(parameter: AudioParam, value: number, context: BaseAudioContext)
 export function createEqualizer(getProfile: (userId: string) => Profile, reportError: (error: unknown) => void) {
     const streams = new Map<VoiceStream, string>();
     const routes = new Map<VoiceStream, Route>();
+    const sinks = new WeakMap<AudioContext, { id: string; failed: boolean; pending?: Promise<void>; }>();
 
-    function detach(data: VoiceStream) {
+    function detach(data: VoiceStream, restore = true) {
         const route = routes.get(data);
         if (!route) return;
         routes.delete(data);
         try {
-            route.gain.disconnect(route.preamp);
+            route.source.disconnect();
+            route.gain.disconnect();
             route.preamp.disconnect();
             route.filters.forEach(filter => filter.disconnect());
-            if (data.audioContext.state !== "closed") route.gain.connect(data.audioContext.destination);
+            if (restore && route.nativeGain && data.audioContext.state !== "closed") route.nativeGain.connect(data.audioContext.destination);
         } catch (error) {
             reportError(error);
         }
     }
 
+    function outputReady(data: VoiceStream) {
+        const context = data.audioContext as OutputContext;
+        const id = data.sinkId === "default" || data.sinkId == null ? "" : data.sinkId;
+        let sink = sinks.get(context);
+        if (!sink?.pending && (context.sinkId === id || (!context.setSinkId && id === ""))) return "ready";
+        if (!sink || sink.id !== id) {
+            const previous = sink?.pending;
+            sink = { id, failed: false };
+            sinks.set(context, sink);
+            if (!context.setSinkId) {
+                sink.failed = true;
+                reportError(new Error("Web Audio output-device selection is unavailable; leaving this stream on native playback."));
+            } else {
+                const selection = sink;
+                // Serialize shared-context changes so an older request cannot win a device switch.
+                selection.pending = (previous ?? Promise.resolve()).then(() => context.setSinkId!(id)).then(() => {
+                    selection.pending = undefined;
+                }).catch(error => {
+                    selection.failed = true;
+                    selection.pending = undefined;
+                    reportError(error);
+                }).then(() => {
+                    if (sinks.get(context) !== selection) return;
+                    for (const output of routes.keys()) {
+                        if (output.audioContext !== context) continue;
+                        try { output.updateAudioElement(); } catch (error) { reportError(error); }
+                    }
+                });
+            }
+        }
+        return sink.failed ? "failed" : sink.pending ? "pending" : "ready";
+    }
+
     function update(data: VoiceStream, userId: string) {
         const profile = normalizeProfile(getProfile(userId));
         const context = data.audioContext;
-        if (!profile.enabled || (profile.preamp === 0 && profile.bands.every(gain => gain === 0))) {
+        const track = data.stream.getAudioTracks().find(track => track.readyState !== "ended");
+        if (!profile.enabled || (profile.preamp === 0 && profile.bands.every(gain => gain === 0)) || !track || !data.audioElement || context.state === "closed") {
             detach(data);
-            return;
+            return false;
         }
-        if (!data.gainNode || context.state === "closed") return;
 
         let route = routes.get(data);
-        if (route && route.gain !== data.gainNode) {
+        if (route && (route.track !== track || route.source.mediaStream !== data.stream)) {
             detach(data);
             route = undefined;
         }
         if (!route) {
+            const source = context.createMediaStreamSource(data.stream);
+            const gain = context.createGain();
             const preamp = context.createGain();
             const filters = createFilters(context);
             const meters = createFilters(context);
+            gain.gain.value = 0;
             preamp.gain.value = 0;
+            route = { source, track, gain, preamp, filters, meters, headroom: 0, signature: "" };
+            routes.set(data, route);
+            source.connect(gain);
+            gain.connect(preamp);
             preamp.connect(filters[0]);
             filters.forEach((filter, i) => filter.connect(filters[i + 1] ?? context.destination));
-            // Only replace VolumeBooster's output edge; leave Discord's analyser and other paths alone.
-            data.gainNode.connect(preamp);
-            try {
+            // VolumeBooster is optional. Suspend only its playback edge, never Discord's analyser.
+            if (data.gainNode) {
                 data.gainNode.disconnect(context.destination);
-            } catch (error) {
-                data.gainNode.disconnect(preamp);
-                preamp.disconnect();
-                filters.forEach(filter => filter.disconnect());
-                throw error;
+                route.nativeGain = data.gainNode;
             }
-            route = { data, userId, gain: data.gainNode, preamp, filters, meters, headroom: 0, signature: "" };
-            routes.set(data, route);
         }
 
+        const output = outputReady(data);
+        if (output === "failed") {
+            detach(data);
+            return false;
+        }
+        data.audioElement.volume = 0;
+        data.audioElement.muted = data._mute;
+        route.gain.gain.value = output === "ready" && !data._mute ? Math.max(0, data._volume) / 100 : 0;
         const signature = JSON.stringify(profile);
-        if (route.signature === signature) return;
+        if (route.signature === signature) return true;
         route.signature = signature;
         route.meters.forEach((filter, i) => filter.gain.value = profile.bands[i]);
         const peak = Math.max(0, ...responseDb(route.meters, context.sampleRate));
@@ -145,27 +198,30 @@ export function createEqualizer(getProfile: (userId: string) => Profile, reportE
         }
         route.filters.forEach((filter, i) => smooth(filter.gain, profile.bands[i], context));
         smooth(route.preamp.gain, gain, context);
+        return true;
     }
 
     function observe(data: VoiceStream, userId: string) {
         streams.set(data, userId);
         try {
-            update(data, userId);
+            return update(data, userId);
         } catch (error) {
             detach(data);
             reportError(error);
+            return false;
         }
     }
 
-    function refresh(userId?: string) {
-        for (const [data, id] of streams) {
-            if (userId == null || userId === id) observe(data, id);
-        }
+    function forget(data: VoiceStream) {
+        detach(data, false);
+        streams.delete(data);
     }
 
     function prune(isCurrent: (data: VoiceStream) => boolean = () => true) {
         for (const data of streams.keys()) {
-            if (data.audioContext.state === "closed" || !data.stream.active || !isCurrent(data)) {
+            if (!isCurrent(data)) {
+                forget(data);
+            } else if (data.audioContext.state === "closed" || !data.stream.active) {
                 detach(data);
                 streams.delete(data);
             }
@@ -174,15 +230,19 @@ export function createEqualizer(getProfile: (userId: string) => Profile, reportE
 
     return {
         observe,
-        refresh,
+        forget,
         prune,
         status(userId: string) {
             const active = [...streams].filter(([data, id]) => id === userId && data.audioContext.state !== "closed" && data.stream.active);
             return { streams: active.length, headroom: Math.max(0, ...active.map(([data]) => routes.get(data)?.headroom ?? 0)) };
         },
         stop() {
-            for (const data of routes.keys()) detach(data);
+            const active = [...routes.keys()];
+            active.forEach(data => detach(data));
             streams.clear();
+            for (const data of active) {
+                try { data.updateAudioElement(); } catch (error) { reportError(error); }
+            }
         }
     };
 }

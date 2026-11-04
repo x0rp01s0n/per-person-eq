@@ -32,7 +32,7 @@ async function build(update) {
     }
     await writeFile(join(staging, "package.json"), "{}\n");
     const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
-    await writeFile(join(staging, "build-info.json"), JSON.stringify({ builtAt: new Date().toISOString(), vencordCommit: commit, plugin: "PerPersonEQ", version: "0.1.0", updaterDisabled: true }, null, 2) + "\n");
+    await writeFile(join(staging, "build-info.json"), JSON.stringify({ builtAt: new Date().toISOString(), vencordCommit: commit, plugin: "PerPersonEQ", version: "0.2.0", updaterDisabled: true }, null, 2) + "\n");
     await rm(join(root, "dist.previous"), { recursive: true, force: true });
     try { await rename(dist, join(root, "dist.previous")); } catch (error) { if (error.code !== "ENOENT") throw error; }
     await rename(staging, dist);
